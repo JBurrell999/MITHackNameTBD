@@ -1,7 +1,9 @@
-import os, glob, argparse, numpy as np, torch
+import os, glob, argparse, numpy as np, torch, sys
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server import MDNRNN, mdn_loss
-from tdqm import tqdm
 
 
 class ZActDataset(Dataset):

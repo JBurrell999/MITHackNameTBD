@@ -15,6 +15,7 @@ __all__ = [
     "ConvVAE",
     "vae_loss",
     "MDNRNN",
+    "mdn_loss",
     "LinearController",
     "DreamEnv",
 ]
