@@ -1,6 +1,13 @@
-import os, glob, argparse, numpy as np, torch
+import os, glob, argparse, numpy as np, torch, sys
 from tqdm import tqdm
-from server.models.vae import ConvVAE
+
+# Add parent directory to path to find server package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from server import ConvVAE
+# from server import ConvVAE  # Adjust the import based on your project structure
+# from server import ConvVAE
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -22,11 +29,15 @@ def main():
         frames = sorted(glob.glob(os.path.join(ep_dir, "frame_*.npy")))
         for fpath in tqdm(frames, desc=os.path.basename(ep_dir)):
             x = np.load(fpath).astype(np.float32) / 255.0
-            x = torch.from_numpy(x).permute(2,0,1).unsqueeze(0).to(device)
+            x = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0).to(device)
             with torch.no_grad():
                 mu, logvar = vae.encode(x)
                 z = mu  # use mean as latent
-            np.save(os.path.join(out_ep, os.path.basename(fpath).replace("frame", "z")), z.squeeze(0).cpu().numpy())
+            np.save(
+                os.path.join(out_ep, os.path.basename(fpath).replace("frame", "z")),
+                z.squeeze(0).cpu().numpy(),
+            )
+
 
 if __name__ == "__main__":
     main()

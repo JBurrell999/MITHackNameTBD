@@ -1,15 +1,17 @@
 import os, argparse, numpy as np, gymnasium as gym
 from PIL import Image
 
+
 def downsample(frame, size=64):
     # frame HxWxC uint8 -> size x size RGB
     return np.array(Image.fromarray(frame).resize((size, size)))
 
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--env", default="CarRacing-v2")
+    ap.add_argument("--env", default="CarRacing-v3")
     ap.add_argument("--episodes", type=int, default=120)
-    ap.add_argument("--frames", type=int, default=800)     # per episode cap
+    ap.add_argument("--frames", type=int, default=800)  # per episode cap
     ap.add_argument("--size", type=int, default=64)
     ap.add_argument("--out", default="data/buffer")
     args = ap.parse_args()
@@ -32,9 +34,11 @@ def main():
 
             obs, rew, terminated, truncated, info = env.step(a)
             done = terminated or truncated
-            if done: break
+            if done:
+                break
             idx += 1
     env.close()
+
 
 if __name__ == "__main__":
     main()

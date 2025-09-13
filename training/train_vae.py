@@ -1,15 +1,25 @@
-import os, glob, argparse, numpy as np, torch
+import os, glob, argparse, numpy as np, torch, sys
 from torch.utils.data import Dataset, DataLoader
-from server.models.vae import ConvVAE, vae_loss
+from tqdm import tqdm
+
+# Add parent directory to path to find server package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from server import ConvVAE, vae_loss
+
 
 class FrameDataset(Dataset):
     def __init__(self, root):
         self.frames = sorted(glob.glob(os.path.join(root, "ep_*", "frame_*.npy")))
-    def __len__(self): return len(self.frames)
+
+    def __len__(self):
+        return len(self.frames)
+
     def __getitem__(self, i):
         x = np.load(self.frames[i]).astype(np.float32) / 255.0
-        x = torch.from_numpy(x).permute(2,0,1)  # C,H,W
+        x = torch.from_numpy(x).permute(2, 0, 1)  # C,H,W
         return x
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -27,15 +37,20 @@ def main():
     opt = torch.optim.Adam(vae.parameters(), lr=1e-3)
 
     vae.train()
-    for ep in range(args.epochs):
+    for ep in tqdm(range(args.epochs), desc="epochs"):
         for i, x in enumerate(dl):
             x = x.to(device)
             xhat, mu, logvar = vae(x)
             loss, logs = vae_loss(x, xhat, mu, logvar, beta=1.0)
-            opt.zero_grad(); loss.backward(); opt.step()
-        print(f"epoch {ep+1} | loss={loss.item():.4f} recon={logs['recon']:.4f} kld={logs['kld']:.4f}")
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+        print(
+            f"epoch {ep + 1} | loss={loss.item():.4f} recon={logs['recon']:.4f} kld={logs['kld']:.4f}"
+        )
     os.makedirs(os.path.dirname(args.save), exist_ok=True)
     torch.save(vae.state_dict(), args.save)
+
 
 if __name__ == "__main__":
     main()
