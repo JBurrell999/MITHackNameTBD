@@ -1,9 +1,12 @@
-import argparse, numpy as np, torch, cma
-from server.models.vae import ConvVAE
-from server.models.mdn_rnn import MDNRNN
-from server.models.controller import LinearController
-from server.models.dream_env import DreamEnv
+import os, glob, argparse, numpy as np, torch, cma, sys
 from tqdm import tqdm
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from server import ConvVAE
+from server import MDNRNN
+from server import LinearController
+from server import DreamEnv
 
 
 def rollout_return(ctrl, dream_env, steps=600, knobs=None):
@@ -11,6 +14,8 @@ def rollout_return(ctrl, dream_env, steps=600, knobs=None):
     total = 0.0
     for t in range(steps):
         z, h = dream_env.get_latent()
+        z = np.squeeze(z)
+        h = np.squeeze(h)
         a = ctrl.act(z, h, knobs)
         _, r, done = dream_env.step(a)
         total += r
