@@ -1,0 +1,8 @@
+gymnasium[box2d]
+numpy
+torch          
+torchvision
+fastapi
+uvicorn
+streamlit
+cma             
