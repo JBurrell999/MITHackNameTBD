@@ -1,0 +1,10 @@
+# configs/bounds.yaml
+alpha_action_smoothing: [0.0, 0.9]
+risk_aversion:          [0.0, 1.0]
+emergency_brake_threshold: [0.3, 1.0]
+lookahead_horizon:      [5, 20]
+
+gating_bias:
+  rain:     [-1.0, 1.0]
+  drift:    [-1.0, 1.0]
+  straight: [-1.0, 1.0]
