@@ -1,4 +1,4 @@
-# VMC Duel
+# Model Madness
 
 Interactive World-Model Car Racing Duel
 
