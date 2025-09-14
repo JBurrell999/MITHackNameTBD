@@ -1,123 +1,141 @@
-# ui/app.py
-import os, time, requests, base64
+# app.py
+import os, time, base64, requests
 import streamlit as st
-import yaml
 
-BOUNDS_PATH = os.getenv("BOUNDS_PATH", "configs/bounds.yaml")
-API = os.getenv("DUEL_API", "http://localhost:8000")
-
-with open(BOUNDS_PATH, "r") as f:
-    BOUNDS = yaml.safe_load(f)
+# ---------------- Config ----------------
+BACKEND_DEFAULT = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
 st.set_page_config(page_title="VMC Duel", layout="wide")
-st.title("V-M-C World Models Duel (2 Cars Head-to-Head)")
+st.title("VMC Duel — Two Cars, One Track")
 
-# --- Control bar ---
-col0, col1, col2, col3 = st.columns([1,1,1,2])
-with col0:
-    if st.button("Start", use_container_width=True):
-        requests.post(f"{API}/control", json={"action":"start"})
-with col1:
-    if st.button("Pause", use_container_width=True):
-        requests.post(f"{API}/control", json={"action":"pause"})
-with col2:
-    seed_in = st.number_input("Seed", min_value=0, max_value=10_000, value=123, step=1)
-    if st.button("Reset", use_container_width=True):
-        requests.post(f"{API}/control", json={"action":"reset","seed":int(seed_in)})
-with col3:
-    st.markdown("**Checkpoints**: knob updates apply every few seconds for fairness.")
+# --------------- Helpers ----------------
+def _get(url, timeout=3.0):
+    r = requests.get(url, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
-st.markdown("---")
+def _post(url, payload, timeout=5.0):
+    r = requests.post(url, json=payload, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
-# --- Player panels ---
+def _b64_to_bytes(s: str):
+    if not s:
+        return None
+    try:
+        return base64.b64decode(s, validate=False)
+    except Exception:
+        return None
+
+# --------------- Sidebar ----------------
+with st.sidebar:
+    st.header("Backend")
+    backend_url = st.text_input("Backend URL", BACKEND_DEFAULT, help="e.g., http://localhost:8000").rstrip("/")
+    col = st.columns(3)
+    with col[0]:
+        if st.button("Health"):
+            try:
+                st.write(_get(f"{backend_url}/health"))
+            except Exception as e:
+                st.error(f"/health failed: {e}")
+    with col[1]:
+        if st.button("Reset"):
+            try:
+                st.write(_post(f"{backend_url}/control", {"action": "reset"}))
+            except Exception as e:
+                st.error(f"/control reset failed: {e}")
+    with col[2]:
+        if st.button("Start"):
+            try:
+                st.write(_post(f"{backend_url}/control", {"action": "start"}))
+            except Exception as e:
+                st.error(f"/control start failed: {e}")
+
+    st.divider()
+    st.subheader("Auto-refresh")
+    poll_hz = st.slider("Telemetry refresh (Hz)", 1, 15, 5, 1)
+    quality_hint = st.selectbox("Frame decode", ["auto", "jpeg"], index=0,
+                                help="auto = let Streamlit detect; jpeg = treat as JPEG bytes explicitly")
+
+# --------------- Knobs ----------------
+def knob_panel(player_key: str):
+    st.subheader(f"Player {player_key} knobs")
+    alpha = st.slider(f"[{player_key}] alpha_action_smoothing", 0.0, 1.0, 0.2, 0.01)
+    risk  = st.slider(f"[{player_key}] risk_aversion", -1.0, 1.0, 0.0, 0.01)
+    ebrk  = st.slider(f"[{player_key}] emergency_brake_threshold", 0.0, 1.5, 0.8, 0.01)
+    look  = st.slider(f"[{player_key}] lookahead_horizon", 1, 30, 10, 1)
+    st.caption("MoE gating bias")
+    rain  = st.slider(f"[{player_key}] rain", -2.0, 2.0, 0.0, 0.01)
+    drift = st.slider(f"[{player_key}] drift", -2.0, 2.0, 0.0, 0.01)
+    straight = st.slider(f"[{player_key}] straight", -2.0, 2.0, 0.0, 0.01)
+
+    if st.button(f"Apply {player_key} (next checkpoint)"):
+        try:
+            payload = {
+                "player": player_key,
+                "params": {
+                    "alpha_action_smoothing": alpha,
+                    "risk_aversion": risk,
+                    "emergency_brake_threshold": ebrk,
+                    "lookahead_horizon": look,
+                    "gating_bias": {"rain": rain, "drift": drift, "straight": straight},
+                },
+            }
+            st.success(_post(f"{backend_url}/update_knobs", payload))
+        except Exception as e:
+            st.error(f"Apply failed: {e}")
+
+colA, colB = st.columns(2)
+with colA: knob_panel("A")
+with colB: knob_panel("B")
+
+st.divider()
+
+# --------------- Live Telemetry & Frames ----------------
 left, right = st.columns(2)
+imgA = left.empty()
+imgB = right.empty()
+stat = st.empty()
 
-def knob_slider(label, bounds, key):
-    lo, hi = bounds
-    val = st.session_state.get(key, (lo+hi)/2)
-    return st.slider(label, min_value=float(lo), max_value=float(hi), value=float(val), key=key)
+period = 1.0 / max(1, poll_hz)
 
-def gating_group(prefix, bounds: dict):
-    vals = {}
-    for subk, rng in bounds.items():
-        key = f"{prefix}_{subk}"
-        vals[subk] = st.slider(f"{subk}", float(rng[0]), float(rng[1]), 0.0, key=key)
-    return vals
-
-with left:
-    st.subheader("Player A Knobs")
-    a_alpha = knob_slider("Action smoothing α", BOUNDS["alpha_action_smoothing"], "A_alpha")
-    a_risk = knob_slider("Risk aversion ρ", BOUNDS["risk_aversion"], "A_risk")
-    a_brake= knob_slider("Emergency brake θ", BOUNDS["emergency_brake_threshold"], "A_brake")
-    a_h    = int(knob_slider("Lookahead horizon H", BOUNDS["lookahead_horizon"], "A_h"))
-    st.caption("MoE gating bias")
-    a_gate = gating_group("A_gate", BOUNDS["gating_bias"])
-    if st.button("Apply A (next checkpoint)"):
-        payload = {
-            "player": "A",
-            "params": {
-                "alpha_action_smoothing": a_alpha,
-                "risk_aversion": a_risk,
-                "emergency_brake_threshold": a_brake,
-                "lookahead_horizon": a_h,
-                "gating_bias": a_gate
-            }
-        }
-        requests.post(f"{API}/update_knobs", json=payload)
-
-with right:
-    st.subheader("Player B Knobs")
-    b_alpha = knob_slider("Action smoothing α", BOUNDS["alpha_action_smoothing"], "B_alpha")
-    b_risk = knob_slider("Risk aversion ρ", BOUNDS["risk_aversion"], "B_risk")
-    b_brake= knob_slider("Emergency brake θ", BOUNDS["emergency_brake_threshold"], "B_brake")
-    b_h    = int(knob_slider("Lookahead horizon H", BOUNDS["lookahead_horizon"], "B_h"))
-    st.caption("MoE gating bias")
-    b_gate = gating_group("B_gate", BOUNDS["gating_bias"])
-    if st.button("Apply B (next checkpoint)"):
-        payload = {
-            "player": "B",
-            "params": {
-                "alpha_action_smoothing": b_alpha,
-                "risk_aversion": b_risk,
-                "emergency_brake_threshold": b_brake,
-                "lookahead_horizon": b_h,
-                "gating_bias": b_gate
-            }
-        }
-        requests.post(f"{API}/update_knobs", json=payload)
-
-st.markdown("---")
-
-# --- Live Telemetry / Frames ---
-fa_col, fb_col = st.columns(2)
-hudA = fa_col.empty()
-hudB = fb_col.empty()
-
-imgA = fa_col.empty()
-imgB = fb_col.empty()
-
-metrics = st.empty()
-
-# simple polling loop
-poll_interval = 0.2  # seconds
 while True:
     try:
-        T = requests.get(f"{API}/telemetry", timeout=2).json()
-        ra = T["playerA"]["reward"]; rb = T["playerB"]["reward"]
-        ota = T["playerA"]["offtrack_time"]; otb = T["playerB"]["offtrack_time"]
+        j = _get(f"{backend_url}/telemetry", timeout=3.0)
 
-        hudA.markdown(f"**A** — Reward: `{ra:.1f}` | Off-track: `{ota:.2f}` | Step: `{T['step']}`")
-        hudB.markdown(f"**B** — Reward: `{rb:.1f}` | Off-track: `{otb:.2f}` | Seed: `{T['seed']}`")
+        running = j.get("running", False)
+        step    = j.get("step", 0)
+        seed    = j.get("seed", -1)
 
-        if T["playerA"]["frame_b64"]:
-            imgA.image(Image.open(io.BytesIO(base64.b64decode(T["playerA"]["frame_b64"]))),
-                       caption="Player A", use_column_width=True)
-        if T["playerB"]["frame_b64"]:
-            imgB.image(Image.open(io.BytesIO(base64.b64decode(T["playerB"]["frame_b64"]))),
-                       caption="Player B", use_column_width=True)
+        A = j.get("playerA", {})
+        B = j.get("playerB", {})
 
-        metrics.caption("Running" if T["running"] else "Paused")
-    except Exception:
-        st.warning("Waiting for server… make sure run_duel.py is running on :8000")
+        # Decode frames
+        A_bytes = _b64_to_bytes(A.get("frame_b64", ""))
+        B_bytes = _b64_to_bytes(B.get("frame_b64", ""))
 
-    time.sleep(poll_interval)
+        # Render
+        capA = f"A — Reward: {A.get('reward',0):.1f} | Off-track: {A.get('offtrack_time',0):.2f}"
+        capB = f"B — Reward: {B.get('reward',0):.1f} | Off-track: {B.get('offtrack_time',0):.2f}"
+
+        if A_bytes:
+            if quality_hint == "jpeg":
+                imgA.image(A_bytes, caption=capA)
+            else:
+                imgA.image(A_bytes, caption=capA)
+        else:
+            imgA.warning("Waiting for A frame…")
+
+        if B_bytes:
+            if quality_hint == "jpeg":
+                imgB.image(B_bytes, caption=capB)
+            else:
+                imgB.image(B_bytes, caption=capB)
+        else:
+            imgB.warning("Waiting for B frame…")
+
+        stat.info(f"running={running} | step={step} | seed={seed}")
+    except Exception as e:
+        stat.error(f"Fetch failed: {e}")
+
+    time.sleep(period)

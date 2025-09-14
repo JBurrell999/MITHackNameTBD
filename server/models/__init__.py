@@ -1,14 +1,8 @@
-from .vae import ConvVAE, vae_loss
-from .mdn_rnn import MDNRNN, mdn_loss
+# server/models/__init__.py
+# Do not import heavy submodules here (mdn_rnn, dream_env, etc.)
 from .controller import LinearController
-from .dream_env import DreamEnv
+from .vae import ConvVAE
 
-__all__ = [
-    "ConvVAE",
-    "vae_loss",
-    "MDNRNN",
-    "mdn_loss",
-    "LinearController",
-    "DreamEnv",
-]
+__all__ = ["LinearController", "ConvVAE"]
+
 
