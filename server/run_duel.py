@@ -1,7 +1,3 @@
-# server/run_duel.py
-# VMC Duel Server — two single-car envs, head-to-head. FastAPI control, Streamlit UI.
-# Fixes: z/a rank mismatch by normalizing to [1,1,•]; uses observations (not render).
-
 import traceback
 import os, io, time, base64, threading, logging
 from typing import Dict, Any, Optional
@@ -69,6 +65,39 @@ def npimg_to_b64(img: np.ndarray, quality: int = 70) -> str:
     im.save(buf, format="JPEG", quality=quality, optimize=True)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
+# ---- Action helpers ----
+def _ema(prev: np.ndarray, cur: np.ndarray, alpha: float) -> np.ndarray:
+    prev = np.asarray(prev, dtype=np.float32).reshape(3,)
+    cur  = np.asarray(cur,  dtype=np.float32).reshape(3,)
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    return alpha * cur + (1.0 - alpha) * prev
+
+def _squash_action(a, min_gas: float = 0.05, brake_deadzone: float = 0.02) -> np.ndarray:
+    """
+    Map raw controller outputs to valid CarRacing action space:
+      steer in [-1,1] via tanh
+      gas   in [0,1] via sigmoid (then floor at min_gas)
+      brake in [0,1] via sigmoid (then apply deadzone and no gas+brake simultaneously)
+    """
+    a = np.asarray(a, dtype=np.float32).reshape(3,)
+    steer = np.tanh(a[0])                 # [-1, 1]
+    gas   = 1.0 / (1.0 + np.exp(-a[1]))   # (0, 1)
+    brake = 1.0 / (1.0 + np.exp(-a[2]))   # (0, 1)
+
+    # keep it rolling
+    if gas < min_gas:
+        gas = min_gas
+
+    # kill tiny brake that cancels gas
+    if brake < brake_deadzone:
+        brake = 0.0
+
+    # never gas & brake at once (prefer gas)
+    if gas > 0.05 and brake > 0.0:
+        brake = 0.0
+
+    return np.array([steer, gas, brake], dtype=np.float32)
+
 # ----------------- Player & Duel State -----------------
 class PlayerState:
     def __init__(self, name: str, controller_weights_path: str, in_dim: int, out_dim: int):
@@ -81,12 +110,16 @@ class PlayerState:
             "emergency_brake_threshold": 0.8,
             "lookahead_horizon": 10,
             "gating_bias": {"rain": 0.0, "drift": 0.0, "straight": 0.0},
+            # expose safe defaults so UI or API can tune if needed
+            "min_gas": 0.05,          # baseline throttle to avoid stalls
+            "brake_deadzone": 0.02,   # ignore tiny brake that cancels gas
         }
         self.pending_knobs: Dict[str, Any] = {}
         self.h = None  # (h, c) for MDN-RNN
         self.total_reward = 0.0
         self.offtrack_time = 0.0
         self.loaded = False
+        self.last_a = np.zeros(3, dtype=np.float32)  # for EMA smoothing
 
     def load_or_fail(self):
         if not os.path.exists(self.path):
@@ -129,7 +162,6 @@ class DuelCore:
         self.reset(seed=self.seed)
         self.last_error = None
 
-
     # ---------- Core helpers ----------
     def _encode_z(self, frame: np.ndarray) -> torch.Tensor:
         # frame: HxWxC uint8 -> 64x64 for VAE
@@ -150,12 +182,11 @@ class DuelCore:
                 z_in = z_in.squeeze(0)
             z_in = z_in.view(1, -1)      # [1, 16]
 
-        # a -> torch [1, 3]
+            # a -> torch [1, 3]
             a_in = torch.as_tensor(a_t, dtype=torch.float32, device=DEVICE).view(1, -1)  # [1, 3]
 
-        # call MDN-RNN (expects z: [1,16], a: [1,3])
+            # call MDN-RNN (expects z: [1,16], a: [1,3])
             _pi, _mu, _ls, P.h = self.mdn(z_in, a_in, P.h)
-
 
     # ---------- Lifecycle ----------
     def reset(self, seed: Optional[int] = None):
@@ -172,6 +203,9 @@ class DuelCore:
         self.pA.offtrack_time = 0.0
         self.pB.offtrack_time = 0.0
         self.step_count = 0
+
+        self.pA.last_a = np.zeros(3, dtype=np.float32)
+        self.pB.last_a = np.zeros(3, dtype=np.float32)
 
         try:
             self.pA.load_or_fail()
@@ -197,14 +231,34 @@ class DuelCore:
         hA_np = self.pA.h[0].squeeze(0).squeeze(0).detach().cpu().numpy()  # [128]
         hB_np = self.pB.h[0].squeeze(0).squeeze(0).detach().cpu().numpy()  # [128]
 
-        # Act
-        aA = self.pA.ctrl.act(zA_np, hA_np, self.pA.knobs)  # numpy [3]
-        aB = self.pB.ctrl.act(zB_np, hB_np, self.pB.knobs)  # numpy [3]
+        # --- Act (raw -> EMA smoothing -> squash to valid range) ---
+        aA_raw = self.pA.ctrl.act(zA_np, hA_np, self.pA.knobs)
+        aB_raw = self.pB.ctrl.act(zB_np, hB_np, self.pB.knobs)
+
+        alphaA = float(self.pA.knobs.get("alpha_action_smoothing", 0.2))
+        alphaB = float(self.pB.knobs.get("alpha_action_smoothing", 0.2))
+
+        # EMA smoothing in raw space (reduces jitter)
+        aA_smooth = _ema(self.pA.last_a, aA_raw, alphaA)
+        aB_smooth = _ema(self.pB.last_a, aB_raw, alphaB)
+        self.pA.last_a = aA_smooth
+        self.pB.last_a = aB_smooth
+
+        # squash to env-legal space with safety nets
+        aA = _squash_action(
+            aA_smooth,
+            min_gas=float(self.pA.knobs.get("min_gas", 0.05)),
+            brake_deadzone=float(self.pA.knobs.get("brake_deadzone", 0.02)),
+        )
+        aB = _squash_action(
+            aB_smooth,
+            min_gas=float(self.pB.knobs.get("min_gas", 0.05)),
+            brake_deadzone=float(self.pB.knobs.get("brake_deadzone", 0.02)),
+        )
 
         # Step envs (obs, reward, done, trunc, info)
-        obsA, rA, termA, truncA, infoA = self.envA.step(np.asarray(aA, dtype=np.float32))
-        obsB, rB, termB, truncB, infoB = self.envB.step(np.asarray(aB, dtype=np.float32))
-
+        obsA, rA, termA, truncA, infoA = self.envA.step(aA.astype(np.float32))
+        obsB, rB, termB, truncB, infoB = self.envB.step(aB.astype(np.float32))
 
         # Update MDN hidden — pass z WITHOUT squeeze; normalizer handles shapes
         self._update_hidden(self.pA, zA_t, aA)
@@ -331,7 +385,7 @@ def telemetry():
             "running": DUEL.running,
             "step": DUEL.step_count,
             "seed": DUEL.seed,
-            "error": DUEL.last_error,   # <— add this
+            "error": DUEL.last_error,
             "playerA": {
                 "reward": DUEL.pA.total_reward,
                 "offtrack_time": DUEL.pA.offtrack_time,
