@@ -4,7 +4,7 @@ Interactive World-Model Car Racing Duel
 
 This project showcases an **end-to-end World Model system** where two AI controllers compete head-to-head in the CarRacing-v3 environment. You can **watch races live, adjust high-level strategy knobs in real time, and explore how learned policies adapt.**
 
-Inspired by the *World Models* framework by David Ha and Jürgen Schmidhuber:contentReference[oaicite:0]{index=0}.
+Inspired by the *World Models* framework by David Ha and Jürgen Schmidhuber
 
 ---
 
