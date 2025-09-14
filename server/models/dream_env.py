@@ -21,7 +21,7 @@ class DreamEnv:
             z_next = mu_k + eps * torch.exp(log_sigma_k)
         self.z = z_next.view(1,1,-1)
         # simple surrogate reward: forward progress proxy = -|z|_perp, penalty for big h-norm
-        reward = float(-0.01 * torch.norm(self.h[0]).item())
+        reward = float(0.01 * torch.norm(self.h[0]).item())
         done = False
         return z_next.cpu().numpy(), reward, done
 
